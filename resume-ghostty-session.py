@@ -6,11 +6,17 @@ each tab cd'd to its directory and resumed to the exact session.
 Usage:
   resume-ghostty-session.py            # dry-run: print the plan
   resume-ghostty-session.py --go       # drive Ghostty (needs Accessibility)
+  --unbound   also open live sessions that had no visible tab, in an extra
+              window (off by default: these are usually stale or exiting)
 
 Per tab:
   claude -> cd <cwd> && claude --resume <sessionId>   (exact conversation)
   vim    -> cd <cwd> && vim <file>
+  app    -> cd <cwd> && <cmd>   (known TUIs such as hx; see GR_APPS in save)
   shell  -> cd <cwd>   (the original command is shown but NOT auto-run)
+
+Tabs whose directory no longer exists (e.g. a removed worktree) are skipped
+with a warning, and windows left with no tabs are not opened.
 
 Mechanism: Ghostty has no API to create a tab running a command, so this uses
 System Events keystrokes (cmd+N new window, cmd+T new tab) and types each
@@ -56,6 +62,8 @@ def tab_command(tab):
         sid = tab.get("sessionId")
         base = f"cd {sh_quote(cwd)} && " if cwd else ""
         return base + (f"claude --resume {sid}" if sid else "claude")
+    if tab["kind"] == "app":
+        return f"cd {sh_quote(cwd)} && {tab['cmd']}" if cwd else tab["cmd"]
     if tab["kind"] == "vim":
         return f"cd {sh_quote(cwd)} && vim {sh_quote(tab.get('file',''))}"
     # shell: only cd; never auto-run the captured command
@@ -69,11 +77,24 @@ def main():
     snap = json.loads(SNAP.read_text())
     windows = snap.get("windows", [])
     unbound = snap.get("unbound_live", [])
-    if unbound:  # append as an extra window so nothing is lost
+    if unbound and "--unbound" in sys.argv:
         windows = windows + [{"window": "(recovered sessions)",
                               "tabs": [{"kind": "claude", "sessionId": u["sessionId"],
                                         "cwd": u["cwd"], "title": u["sessionId"][:8]}
                                        for u in unbound]}]
+
+    skipped = []
+    kept = []
+    for w in windows:
+        tabs = []
+        for t in w["tabs"]:
+            if t.get("cwd") and not os.path.isdir(t["cwd"]):
+                skipped.append((w["window"], t))
+            else:
+                tabs.append(t)
+        if tabs:
+            kept.append({**w, "tabs": tabs})
+    windows = kept
 
     # plan
     print(f"Plan: {len(windows)} window(s)"
@@ -85,6 +106,14 @@ def main():
             print(f"  {j:>2}. {tab_command(t)}{note}")
             if t["kind"] == "shell":
                 print(f"       (was: {t.get('cmd','')})")
+    if skipped:
+        print("\nSkipped (directory no longer exists):")
+        for wname, t in skipped:
+            print(f"  [{wname}] {t.get('title','')}: {tab_command(t)}")
+    if unbound and "--unbound" not in sys.argv:
+        print(f"\n{len(unbound)} live session(s) had no visible tab; pass --unbound to open them:")
+        for u in unbound:
+            print(f"  {u['sessionId'][:8]}  {u['cwd']}")
     if not go:
         print("\nRe-run with --go to rebuild it in Ghostty.")
         return
