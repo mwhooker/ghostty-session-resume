@@ -59,13 +59,21 @@ grouping and left-to-right order while binding each tab to the right session.
 
 Per tab:
 
-- **claude** → `cd <cwd> && claude --resume <sessionId>` (exact conversation)
+- **claude** → `cd <cwd> && claude --resume <sessionId>` (exact conversation).
+  `<cwd>` is the directory the session was launched from (where its transcript
+  lives), not where it currently is: a session that entered a worktree resumes
+  from the main checkout, so removing that worktree later doesn't pull the
+  directory out from under the process.
 - **vim** → `cd <cwd> && vim <file>`
+- **app** → `cd <cwd> && <cmd>` for tabs titled with a known TUI (`hx` by
+  default; set `GR_APPS="hx k9s ..."` when saving).
 - **shell** → `cd <cwd>` only. The original command (e.g. `./deploy.sh`) is
   printed but **never auto-run**.
 
-Live sessions whose title didn't match a visible tab are appended in a final
-`(recovered sessions)` window, so nothing is dropped.
+Tabs whose directory no longer exists (e.g. a removed worktree) are skipped with
+a warning. Live sessions whose title didn't match any visible tab are listed in
+the plan; pass `--unbound` to open them in an extra `(recovered sessions)`
+window. That's off by default because they're usually stale or exiting.
 
 `resume --go` drives Ghostty with synthetic keystrokes (`cmd+N` new window,
 `cmd+T` new tab) and types each command, so **don't type in Ghostty while it

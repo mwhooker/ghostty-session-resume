@@ -14,7 +14,13 @@ Authoritative sources (no setup changes, no title hacking required):
 Result: each visual tab is bound to its exact session id + cwd, preserving
 window grouping and left-to-right order. Tabs whose title Claude hasn't
 summarised yet ("Claude Code"), or non-Claude tabs (vim/shell), are recorded by
-title and best-effort cwd.
+title and best-effort cwd. Tabs running a known TUI (GR_APPS, default "hx")
+are recorded as "app" and relaunched on restore.
+
+A Claude tab's cwd is the directory the session was launched from (the one its
+transcript lives under), not the process's current cwd: a session that entered
+a worktree must be resumed from the main checkout, or the restored process ends
+up living inside a worktree that may later be removed.
 
 Output: ~/.ghostty-session/session.json  +  human summary on stdout.
 Needs Accessibility permission (System Settings > Privacy & Security).
@@ -26,6 +32,46 @@ HOME = Path.home()
 OUT_DIR = HOME / ".ghostty-session"
 SESS_DIR = HOME / ".claude" / "sessions"
 PROJECTS = HOME / ".claude" / "projects"
+APPS = set(os.environ.get("GR_APPS", "hx").split())
+
+
+def encode(path):
+    """Claude's project-dir name for a cwd: every non-alphanumeric -> '-'."""
+    return re.sub(r"[^A-Za-z0-9]", "-", path)
+
+
+def transcript(sid):
+    """The session's main transcript. A session can leave a small stub under a
+    worktree's project dir on exit; the real one is the largest."""
+    fps = glob.glob(str(PROJECTS / "*" / f"{sid}.jsonl"))
+    return max(fps, key=os.path.getsize) if fps else None
+
+
+def launch_cwd(sid, live_cwd):
+    """Directory to resume `sid` from: the candidate cwd that encodes to the
+    project dir holding its transcript, so `claude --resume` finds it there and
+    the process doesn't start inside a worktree."""
+    fp = transcript(sid)
+    if not fp:
+        return live_cwd
+    proj = os.path.basename(os.path.dirname(fp))
+    cands = [live_cwd]
+    with open(fp) as f:
+        for line in f:
+            if '"worktree-state"' in line:
+                try:
+                    ws = json.loads(line).get("worktreeSession") or {}
+                except Exception:
+                    continue
+                cands += [ws.get("originalCwd"), ws.get("preEnterOriginalCwd")]
+            elif len(cands) < 4:
+                m = re.search(r'"cwd":"([^"]+)"', line)
+                if m:
+                    cands.append(m.group(1))
+    for c in cands:
+        if c and encode(c) == proj and os.path.isdir(c):
+            return c
+    return live_cwd
 
 
 def alive(pid):
@@ -37,7 +83,8 @@ def alive(pid):
 
 
 def live_sessions():
-    """sid -> {pid, cwd, status, alive} from the per-pid store."""
+    """sid -> {pid, cwd, status, alive} for interactive sessions in the
+    per-pid store (background/SDK workers have no tab to restore)."""
     out = {}
     for fp in glob.glob(str(SESS_DIR / "*.json")):
         try:
@@ -45,7 +92,7 @@ def live_sessions():
         except Exception:
             continue
         sid = d.get("sessionId")
-        if sid:
+        if sid and d.get("kind", "interactive") == "interactive":
             out[sid] = {"pid": d.get("pid"), "cwd": d.get("cwd"),
                         "status": d.get("status"), "alive": alive(d.get("pid"))}
     return out
@@ -147,24 +194,27 @@ def main():
         wd = {"window": GLYPH.sub("", w["window"]), "tabs": []}
         for raw in w["tabs"]:
             kind, cwd, clean = classify(raw)
+            if kind == "claude" and clean not in t2s and clean in APPS:
+                kind = "app"
             tab = {"title": clean, "kind": kind}
             if kind == "claude":
                 sid = t2s.get(clean)
                 tab["sessionId"] = sid
-                tab["cwd"] = (live.get(sid, {}).get("cwd") if sid else None) or w["cwd"]
+                live_cwd = live.get(sid, {}).get("cwd") if sid else None
+                tab["cwd"] = (launch_cwd(sid, live_cwd) if sid else None) or w["cwd"]
                 tab["alive"] = bool(sid and live.get(sid, {}).get("alive"))
                 if sid:
                     bound.add(sid)
             elif kind == "vim":
                 tab["cwd"] = cwd or w["cwd"]
                 tab["file"] = clean
-            else:
+            else:  # shell / app
                 tab["cwd"] = w["cwd"]
                 tab["cmd"] = clean
             wd["tabs"].append(tab)
         windows.append(wd)
 
-    unbound = [{"sessionId": s, "cwd": i["cwd"]}
+    unbound = [{"sessionId": s, "cwd": launch_cwd(s, i["cwd"])}
                for s, i in live.items() if i["alive"] and s not in bound]
 
     OUT_DIR.mkdir(exist_ok=True)
@@ -182,7 +232,7 @@ def main():
             else:
                 print(f"  {j:>2}. ({t['kind']:5}) {t['title'][:44]}")
     if unbound:
-        print("\nLive sessions with no matching visible tab (will be appended on restore):")
+        print("\nLive sessions with no matching visible tab (restore with --unbound):")
         for u in unbound:
             print(f"  {u['sessionId'][:8]}  {u['cwd']}")
 
